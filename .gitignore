@@ -1,0 +1,7 @@
+bin/
+obj/
+.vs/
+publish*/
+dist/
+*.vsix
+AI-Usage-Widget-交接.md

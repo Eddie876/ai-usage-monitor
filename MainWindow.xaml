@@ -1,0 +1,13 @@
+<Window x:Class="AiUsageWidget.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="AI 額度" Width="210" Height="470" WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True" Topmost="True" Background="Transparent" ShowInTaskbar="False" Loaded="OnLoaded" Closing="OnClosing" Activated="OnActivated" Deactivated="OnDeactivated" PreviewMouseLeftButtonDown="OnDrag">
+  <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="10" Background="{StaticResource BackgroundBrush}">
+    <DockPanel>
+      <Grid DockPanel.Dock="Top" Background="Transparent" Margin="12,10,12,8">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="34"/><ColumnDefinition Width="34"/></Grid.ColumnDefinitions>
+        <TextBlock Text="AI 用量" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" Margin="4,0,0,0" Cursor="SizeAll"/>
+        <Button Grid.Column="1" x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="↻" FontSize="19" Click="OnRefresh" Margin="0,0,4,0"/>
+        <Button Grid.Column="2" Style="{StaticResource IconButton}" Content="×" FontSize="19" Click="OnHide"/>
+      </Grid>
+      <StackPanel x:Name="Cards" Margin="8,2,8,8"/>
+    </DockPanel>
+  </Border>
+</Window>

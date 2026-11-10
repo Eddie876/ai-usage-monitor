@@ -1,0 +1,16 @@
+{
+  "name": "ai-usage-copilot-bridge",
+  "displayName": "AI 額度 Copilot Bridge",
+  "description": "將目前 VS Code GitHub 帳號的 Copilot 額度提供給本機 AI 額度視窗。",
+  "version": "0.1.0",
+  "publisher": "ai-usage-widget-local",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": { "commands": [
+    { "command": "aiUsageWidget.connectCopilot", "title": "AI 額度：連接 VS Code 的 GitHub 帳號" },
+    { "command": "aiUsageWidget.disconnectCopilot", "title": "AI 額度：中斷 Copilot 連接" },
+    { "command": "aiUsageWidget.refreshCopilot", "title": "AI 額度：重新整理 Copilot" }
+  ] }
+}

@@ -1,0 +1,67 @@
+using AiUsageWidget;
+var tmp = Path.Combine(Path.GetTempPath(), "ai-widget-tests-" + Guid.NewGuid().ToString("N"));
+var config = Path.Combine(tmp, "config");
+var local = Path.Combine(tmp, "local");
+try
+{
+    var dir = Path.Combine(config, "Claude");
+    Directory.CreateDirectory(dir);
+    var file = Path.Combine(dir, "plan-usage-history.json");
+    var storeDir = Path.Combine(local, "Packages", "Claude_test", "LocalCache", "Roaming", "Claude");
+    Directory.CreateDirectory(storeDir);
+    File.WriteAllText(Path.Combine(storeDir, "config.json"), "{}");
+    File.WriteAllText(Path.Combine(storeDir, "Local State"), "{}");
+    if (ClaudeLive.FindDataDirectory(config, local) != null) throw new Exception("Incomplete Claude store must not be selected.");
+    File.WriteAllText(Path.Combine(storeDir, "plan-usage-history.json"), "{}");
+    if (ClaudeLive.FindDataDirectory(config, local) != storeDir) throw new Exception("Store package Claude directory must be detected.");
+    File.Delete(Path.Combine(storeDir, "plan-usage-history.json"));
+    if (UsageSources.Claude(config, local).Limits.Count != 0) throw new Exception("Missing Claude history must be unknown.");
+    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    File.WriteAllText(file, $"{{\"samples\":[{{\"t\":{now-60000},\"org\":\"old\",\"u\":{{\"fh\":80,\"sd\":90}}}},{{\"t\":{now},\"org\":\"new\",\"u\":{{\"fh\":10,\"sd\":20}}}}]}}");
+    var claude = UsageSources.Claude(config, local);
+    if (claude.Limits.Count != 2 || claude.Limits[0].Used != 10 || claude.Limits[1].Used != 20 || claude.Limits.Any(x => x.Reset != null)) throw new Exception("The latest sample must not include inferred resets.");
+    File.WriteAllText(file, "{}");
+    if (UsageSources.Claude(config, local).Limits.Count != 0) throw new Exception("Invalid history must be unavailable.");
+    var bridgeDir = Path.Combine(local, "AiUsageWidget"); Directory.CreateDirectory(bridgeDir);
+    var bridge = Path.Combine(bridgeDir, "copilot-usage.json");
+    File.WriteAllText(bridge, "{\"version\":1,\"account\":\"example\",\"observedAt\":\"" + DateTimeOffset.UtcNow.ToString("O") + "\",\"usedPercent\":60,\"resetAt\":null}");
+    var copilot = UsageSources.Copilot(local);
+    if (copilot.Limits.Count != 1 || copilot.Limits[0].Used != 60 || copilot.Stale || !copilot.Note!.Contains("example")) throw new Exception("Valid Copilot reading not displayed.");
+    if (copilot.Limits[0].Label != "本月" || UsageSources.CopilotPlanLabel("individual") != "Pro" || UsageSources.CopilotPlanLabel("free") != "Free" || UsageSources.CopilotPlanLabel("unknown") != null) throw new Exception("Copilot labels must be recognizable without inventing unknown plans.");
+    File.WriteAllText(bridge, "{\"version\":1,\"account\":\"example\",\"observedAt\":\"2020-01-01T00:00:00Z\",\"usedPercent\":60}");
+    if (!UsageSources.Copilot(local).Stale) throw new Exception("Old Copilot reading must be stale.");
+    File.WriteAllText(bridge, "{\"version\":1,\"account\":\"example\",\"observedAt\":\"" + DateTimeOffset.UtcNow.ToString("O") + "\",\"usedPercent\":-1}");
+    if (UsageSources.Copilot(local).Limits.Count != 0) throw new Exception("Invalid percentage must be rejected.");
+    var account = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    var org = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    var other = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    var expiry = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeMilliseconds();
+    var json = $"{{\"acct:{account}|client:{org}:https://api.anthropic.com/:user:inference user:profile\":{{\"token\":\"example\",\"expiresAt\":{expiry}}}}}";
+    var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+    if (ClaudeLive.SelectToken(bytes, account, org, now)?.Token != "example") throw new Exception("Expected matching scoped token.");
+    if (ClaudeLive.SelectToken(bytes, account, other, now) != null || ClaudeLive.SelectToken(bytes, other, org, now) != null) throw new Exception("Cross-account tokens must not be selected.");
+    if (ClaudeLive.SelectToken(bytes, account, org, expiry) != null) throw new Exception("Expired tokens must not be selected.");
+    var alternative = System.Text.Encoding.UTF8.GetBytes($"{{\"acct:{account}|{org}:client:https://api.anthropic.com:user:inference user:profile\":{{\"token\":\"other\",\"expiresAt\":{expiry}}}}}");
+    if (ClaudeLive.SelectToken(alternative, account, org, now)?.Token != "other") throw new Exception("Desktop organization-first keys must be supported.");
+    var unscoped = System.Text.Encoding.UTF8.GetBytes($"{{\"acct:{account}|{org}:client:https://api.anthropic.com:user:profile\":{{\"token\":\"other\",\"expiresAt\":{expiry}}}}}");
+    if (ClaudeLive.SelectToken(unscoped, account, org, now) != null) throw new Exception("Inference scope is required for usage.");
+    using var profileJson = System.Text.Json.JsonDocument.Parse($"{{\"account\":{{\"uuid\":\"{account}\"}},\"organization\":{{\"uuid\":\"{org}\"}}}}");
+    if (!ClaudeLive.ProfileMatches(profileJson.RootElement, account, org) || ClaudeLive.ProfileMatches(profileJson.RootElement, account, other)) throw new Exception("OAuth account and organization must match the selected desktop profile.");
+    using var flatProfile = System.Text.Json.JsonDocument.Parse($"{{\"account_uuid\":\"{account}\",\"organization_uuid\":\"{org}\"}}");
+    if (!ClaudeLive.ProfileMatches(flatProfile.RootElement, account, org) || ClaudeLive.ProfileMatches(flatProfile.RootElement, account, other)) throw new Exception("Flat OAuth profile IDs must also be matched exactly.");
+    var history = System.Text.Encoding.UTF8.GetBytes($"{{\"samples\":[{{\"t\":1,\"org\":\"{other}\"}},{{\"t\":2,\"org\":\"{org}\"}}]}}");
+    if (ClaudeLive.LatestOrganization(history) != org) throw new Exception("Latest desktop organization not selected.");
+    var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+    var nonce = System.Security.Cryptography.RandomNumberGenerator.GetBytes(12);
+    var cipher = new byte[bytes.Length]; var tag = new byte[16];
+    using (var aes = new System.Security.Cryptography.AesGcm(key, 16)) aes.Encrypt(nonce, bytes, cipher, tag);
+    var frame = System.Text.Encoding.ASCII.GetBytes("v10").Concat(nonce).Concat(cipher).Concat(tag).ToArray();
+    if (!ClaudeLive.DecryptTokenCache(frame, key).SequenceEqual(bytes)) throw new Exception("Desktop token cache decryption failed.");
+    frame[^1] ^= 1;
+    try { ClaudeLive.DecryptTokenCache(frame, key); throw new Exception("Tampered ciphertext accepted."); } catch (System.Security.Cryptography.CryptographicException) { }
+    using var usageJson = System.Text.Json.JsonDocument.Parse("{\"five_hour\":{\"utilization\":25,\"resets_at\":\"2027-01-01T00:00:00Z\"},\"seven_day\":{\"utilization\":101}}");
+    var windows = ClaudeLive.ParseWindows(usageJson.RootElement);
+    if (windows.Count != 1 || windows[0].Used != 25 || windows[0].Reset is null) throw new Exception("Reported quota windows not validated.");
+    Console.WriteLine("Claude and Copilot source checks passed.");
+}
+finally { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); }
