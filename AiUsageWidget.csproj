@@ -8,9 +8,10 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>AiUsageWidget</AssemblyName>
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
+    <EmbeddedResource Include="icon.ico" LogicalName="AiUsageWidget.icon.ico" />
   </ItemGroup>
 </Project>

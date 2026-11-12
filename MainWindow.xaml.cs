@@ -19,6 +19,7 @@ namespace AiUsageWidget;
 public partial class MainWindow : Window
 {
     private readonly Forms.NotifyIcon tray;
+    private readonly System.Drawing.Icon trayIcon;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMinutes(1) };
     private readonly DispatcherTimer displayTimer = new() { Interval = TimeSpan.FromMinutes(1) };
     private readonly List<Usage> readings = new();
@@ -29,7 +30,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        tray = new Forms.NotifyIcon { Icon = System.Drawing.SystemIcons.Application, Text = "AI 額度", Visible = true };
+        trayIcon = CreateTrayIcon();
+        tray = new Forms.NotifyIcon { Icon = trayIcon, Text = "AI 額度", Visible = true };
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("顯示／隱藏", null, (_, _) => ToggleWindow());
         menu.Items.Add("立即更新", null, async (_, _) => await Refresh());
@@ -42,7 +44,7 @@ public partial class MainWindow : Window
         start.Click += (_, _) => { SetAutoStart(!IsAutoStartEnabled()); start.Checked = IsAutoStartEnabled(); };
         menu.Items.Add(start);
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("結束", null, (_, _) => { exiting = true; SavePosition(); tray.Visible = false; tray.Dispose(); System.Windows.Application.Current.Shutdown(); });
+        menu.Items.Add("結束", null, (_, _) => { exiting = true; SavePosition(); tray.Visible = false; tray.Dispose(); trayIcon.Dispose(); System.Windows.Application.Current.Shutdown(); });
         tray.ContextMenuStrip = menu;
         tray.MouseClick += (_, e) => { if (e.Button == Forms.MouseButtons.Left) ToggleWindow(); };
         timer.Tick += async (_, _) => await Refresh();
@@ -122,6 +124,33 @@ public partial class MainWindow : Window
         var template = new ControlTemplate(typeof(ProgressBar)) { VisualTree = outer }; return template;
     }
     private static Brush Brush(string value) => (Brush)new BrushConverter().ConvertFromString(value)!;
+    private static System.Drawing.Icon CreateTrayIcon()
+    {
+        using var stream = typeof(MainWindow).Assembly.GetManifestResourceStream("AiUsageWidget.icon.ico") ?? throw new InvalidOperationException("Application icon is missing.");
+        using var icon = new System.Drawing.Icon(stream);
+        using var source = icon.ToBitmap();
+        int left = source.Width, top = source.Height, right = -1, bottom = -1;
+        for (int y = 0; y < source.Height; y++)
+            for (int x = 0; x < source.Width; x++)
+                if (source.GetPixel(x, y).A >= 32)
+                { left = Math.Min(left, x); top = Math.Min(top, y); right = Math.Max(right, x); bottom = Math.Max(bottom, y); }
+        if (right < left || bottom < top) return (System.Drawing.Icon)icon.Clone();
+        var width = right - left + 1; var height = bottom - top + 1;
+        const int size = 64, padding = 0;
+        var scale = (double)(size - 2 * padding) / Math.Max(width, height);
+        var targetWidth = (float)(width * scale); var targetHeight = (float)(height * scale);
+        using var bitmap = new System.Drawing.Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
+        {
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            graphics.DrawImage(source, new System.Drawing.RectangleF((size - targetWidth) / 2, (size - targetHeight) / 2, targetWidth, targetHeight), new System.Drawing.RectangleF(left, top, width, height), System.Drawing.GraphicsUnit.Pixel);
+        }
+        var handle = bitmap.GetHicon();
+        try { using var resized = System.Drawing.Icon.FromHandle(handle); return (System.Drawing.Icon)resized.Clone(); }
+        finally { DestroyIcon(handle); }
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool DestroyIcon(IntPtr handle);
     private static string ResetText(DateTimeOffset? date)
     {
         if (date is null) return "重置時間未知";
