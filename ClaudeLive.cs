@@ -146,13 +146,40 @@ internal static class ClaudeLive
     internal static List<Limit> ParseWindows(JsonElement root)
     {
         var limits = new List<Limit>();
+        if (root.ValueKind != JsonValueKind.Object) return limits;
+
         foreach (var (key, label) in new[] { ("five_hour", "目前時段"), ("seven_day", "本週") })
         {
-            if (!root.TryGetProperty(key, out var window) || window.ValueKind != JsonValueKind.Object || !window.TryGetProperty("utilization", out var n) || n.ValueKind != JsonValueKind.Number || !n.TryGetDouble(out var used) || !double.IsFinite(used) || used < 0 || used > 100) continue;
-            DateTimeOffset? reset = DateTimeOffset.TryParse(GetString(window, "resets_at"), out var date) ? date : null;
-            limits.Add(new(label, used, reset));
+            if (root.TryGetProperty(key, out var window) && ParseWindow(window, "utilization", label) is { } limit)
+                limits.Add(limit);
+        }
+
+        if (root.TryGetProperty("limits", out var scoped) && scoped.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var window in scoped.EnumerateArray())
+            {
+                if (GetString(window, "kind") != "weekly_scoped" ||
+                    !window.TryGetProperty("scope", out var scope) || scope.ValueKind != JsonValueKind.Object ||
+                    !scope.TryGetProperty("model", out var model)) continue;
+
+                var name = GetString(model, "display_name");
+                if (!string.Equals(name, "Fable", StringComparison.OrdinalIgnoreCase) &&
+                    name?.StartsWith("Fable ", StringComparison.OrdinalIgnoreCase) != true) continue;
+
+                if (ParseWindow(window, "percent", "Fable 本週") is not { } fable) continue;
+                limits.Add(fable);
+                break;
+            }
         }
         return limits;
+    }
+    private static Limit? ParseWindow(JsonElement window, string percentKey, string label)
+    {
+        if (window.ValueKind != JsonValueKind.Object || !window.TryGetProperty(percentKey, out var n) ||
+            n.ValueKind != JsonValueKind.Number || !n.TryGetDouble(out var used) || !double.IsFinite(used) || used < 0 || used > 100) return null;
+
+        DateTimeOffset? reset = DateTimeOffset.TryParse(GetString(window, "resets_at"), out var date) ? date : null;
+        return new(label, used, reset);
     }
     internal static bool ProfileMatches(JsonElement root, string account, string org)
     {

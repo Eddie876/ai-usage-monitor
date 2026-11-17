@@ -62,6 +62,33 @@ try
     using var usageJson = System.Text.Json.JsonDocument.Parse("{\"five_hour\":{\"utilization\":25,\"resets_at\":\"2027-01-01T00:00:00Z\"},\"seven_day\":{\"utilization\":101}}");
     var windows = ClaudeLive.ParseWindows(usageJson.RootElement);
     if (windows.Count != 1 || windows[0].Used != 25 || windows[0].Reset is null) throw new Exception("Reported quota windows not validated.");
+    using var fableUsage = System.Text.Json.JsonDocument.Parse("""
+        {
+          "five_hour": { "utilization": 25 },
+          "seven_day": { "utilization": 50 },
+          "limits": [
+            null,
+            { "kind": "weekly_scoped", "percent": 60, "scope": { "model": { "display_name": "Opus" } } },
+            { "kind": "weekly_scoped", "percent": -5, "scope": { "model": { "display_name": "Fable" } } },
+            { "kind": "weekly_scoped", "percent": 44, "resets_at": "2027-01-02T00:00:00Z", "is_active": false,
+              "scope": { "model": { "id": null, "display_name": "Fable" } } },
+            { "kind": "weekly_scoped", "percent": 44, "scope": { "model": { "display_name": "Fable" } } }
+          ]
+        }
+        """);
+    var fableWindows = ClaudeLive.ParseWindows(fableUsage.RootElement);
+    if (!fableWindows.SequenceEqual(new Limit[] {
+        new("目前時段", 25, null), new("本週", 50, null),
+        new("Fable 本週", 44, new DateTimeOffset(2027, 1, 2, 0, 0, 0, TimeSpan.Zero))
+    })) throw new Exception("Fable should appear once, after the subscription windows, with its own utilization and reset.");
+
+    using var unusedFable = System.Text.Json.JsonDocument.Parse("""
+        { "five_hour": null, "limits": [
+          { "kind": "weekly_scoped", "percent": 0, "scope": { "model": { "display_name": "fable 5.2" } } }
+        ] }
+        """);
+    if (!ClaudeLive.ParseWindows(unusedFable.RootElement).SequenceEqual(new Limit[] { new("Fable 本週", 0, null) }))
+        throw new Exception("A valid zero-usage Fable window should still appear when there is no session limit.");
     Console.WriteLine("Claude and Copilot source checks passed.");
 }
 finally { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); }
