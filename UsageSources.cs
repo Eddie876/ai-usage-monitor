@@ -58,15 +58,16 @@ internal static class UsageSources
         try
         {
             var bin = await FindCodex(cancellation);
+            cancellation.ThrowIfCancellationRequested();
             if (bin is null) return Missing("Codex", "找不到 Codex Desktop 或 Codex CLI。");
             using var p = new Process { StartInfo = new ProcessStartInfo(bin, "app-server") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true } };
             if (!p.Start()) return Missing("Codex", "無法啟動 Codex 用量查詢。");
             _ = p.StandardError.ReadToEndAsync(cancellation);
             try
             {
-                await p.StandardInput.WriteLineAsync("{\"method\":\"initialize\",\"id\":0,\"params\":{\"clientInfo\":{\"name\":\"ai-usage-widget\",\"version\":\"0.1.0\"}}}");
-                await p.StandardInput.WriteLineAsync("{\"method\":\"initialized\"}");
-                await p.StandardInput.WriteLineAsync("{\"method\":\"account/rateLimits/read\",\"id\":1}");
+                await p.StandardInput.WriteLineAsync("{\"method\":\"initialize\",\"id\":0,\"params\":{\"clientInfo\":{\"name\":\"ai-usage-widget\",\"version\":\"0.1.0\"}}}".AsMemory(), cancellation);
+                await p.StandardInput.WriteLineAsync("{\"method\":\"initialized\"}".AsMemory(), cancellation);
+                await p.StandardInput.WriteLineAsync("{\"method\":\"account/rateLimits/read\",\"id\":1}".AsMemory(), cancellation);
                 await p.StandardInput.FlushAsync(cancellation);
                 while (await p.StandardOutput.ReadLineAsync(cancellation) is { } line)
                 {
@@ -104,10 +105,17 @@ internal static class UsageSources
         var script = "$p=Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | Sort-Object Version -Descending | Select-Object -First 1; if($p){[Console]::Out.Write($p.InstallLocation)}";
         using var p = new Process { StartInfo = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true } };
         p.StartInfo.ArgumentList.Add("-NoProfile"); p.StartInfo.ArgumentList.Add("-NonInteractive"); p.StartInfo.ArgumentList.Add("-Command"); p.StartInfo.ArgumentList.Add(script);
+        ct.ThrowIfCancellationRequested();
         if (p.Start())
         {
-            var location = (await p.StandardOutput.ReadToEndAsync(ct)).Trim();
-            await p.WaitForExitAsync(ct);
+            string location;
+            try
+            {
+                location = (await p.StandardOutput.ReadToEndAsync(ct)).Trim();
+                await p.WaitForExitAsync(ct);
+            }
+            finally { if (!p.HasExited) p.Kill(true); }
+            ct.ThrowIfCancellationRequested();
             var source = Path.Combine(location, "app", "resources", "codex.exe");
             if (location.Length > 0 && File.Exists(source))
             {
@@ -121,6 +129,7 @@ internal static class UsageSources
                     using var targetFile = File.OpenRead(target);
                     same = CryptographicOperations.FixedTimeEquals(SHA256.HashData(sourceFile), SHA256.HashData(targetFile));
                 }
+                ct.ThrowIfCancellationRequested();
                 if (!same) File.Copy(source, target, true);
                 return target;
             }

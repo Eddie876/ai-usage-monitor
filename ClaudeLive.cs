@@ -48,6 +48,7 @@ internal static class ClaudeLive
         byte[]? plain = null; byte[]? key = null;
         try
         {
+            cancellation.ThrowIfCancellationRequested();
             var dir = FindDataDirectory(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
             if (dir is null) return Unavailable("找不到完整的 Claude Desktop 登入及用量紀錄。");
             var configPath = Path.Combine(dir, "config.json");
@@ -80,6 +81,7 @@ internal static class ClaudeLive
             var limits = ParseWindows(usage.RootElement);
             if (limits.Count == 0) return Unavailable("Claude 未回報可顯示的額度資料。");
             // Fail closed if the local account, selected organization or token changed while querying.
+            cancellation.ThrowIfCancellationRequested();
             if (!CryptographicOperations.FixedTimeEquals(configDigest, SHA256.HashData(ReadBounded(configPath))) ||
                 !string.Equals(org, LatestOrganization(ReadBounded(historyPath)), StringComparison.OrdinalIgnoreCase)) return Unavailable("查詢期間 Claude 帳號或組織發生變更。");
             LastFailure = "";
@@ -193,6 +195,7 @@ internal static class ClaudeLive
     private static string? GetString(JsonElement parent, string name) => parent.ValueKind == JsonValueKind.Object && parent.TryGetProperty(name, out var x) && x.ValueKind == JsonValueKind.String ? x.GetString() : null;
     private static async Task<JsonDocument?> GetJson(string url, string token, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         request.Headers.Add("anthropic-beta", "oauth-2025-04-20");

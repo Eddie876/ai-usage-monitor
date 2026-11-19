@@ -6,6 +6,7 @@ const https = require('node:https');
 const crypto = require('node:crypto');
 const directory = path.join(process.env.LOCALAPPDATA || '', 'AiUsageWidget');
 const output = path.join(directory, 'copilot-usage.json');
+const sourcesFile = path.join(directory, 'sources.json');
 const scope = ['user:email'];
 let refreshing = false;
 let nextAllowed = 0;
@@ -14,20 +15,40 @@ let epoch = 0;
 let interval;
 let writes = Promise.resolve();
 
-function write(value) {
+async function isMonitoringCopilot() {
+  if (!process.env.LOCALAPPDATA) return false;
+  try {
+    const contents = await fs.readFile(sourcesFile, 'utf8');
+    const sources = JSON.parse(contents.replace(/^\uFEFF/, ''));
+    return sources?.copilot !== false;
+  } catch (error) {
+    // Missing and malformed settings use the same defaults as the widget.
+    return error.code === 'ENOENT' || error instanceof SyntaxError;
+  }
+}
+
+async function canRefresh(generation) {
+  return await isMonitoringCopilot() && enabled && generation === epoch;
+}
+
+function write(value, { generation = epoch, requiresMonitoring = false } = {}) {
   // Serialize file replacement so a logout/account change cannot be overwritten
   // by an older in-flight refresh after its invalidation has been published.
-  const generation = epoch;
-  const operation = writes.catch(() => {}).then(() => writeCurrent(value, generation));
+  const operation = writes.catch(() => {}).then(() => writeCurrent(value, generation, requiresMonitoring));
   writes = operation;
   return operation;
 }
-async function writeCurrent(value, generation) {
+async function writeCurrent(value, generation, requiresMonitoring) {
   if (generation !== epoch) return;
+  if (requiresMonitoring && !await canRefresh(generation)) return;
   if (!process.env.LOCALAPPDATA) throw new Error('LOCALAPPDATA unavailable');
   await fs.mkdir(directory, { recursive: true });
   const tmp = path.join(directory, `copilot-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
-  try { await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600 }); if (generation === epoch) await fs.rename(tmp, output); }
+  try {
+    await fs.writeFile(tmp, JSON.stringify(value), { mode: 0o600 });
+    if (requiresMonitoring && !await isMonitoringCopilot()) return;
+    if (generation === epoch) await fs.rename(tmp, output);
+  }
   finally { await fs.rm(tmp, { force: true }).catch(() => {}); }
 }
 function fetchQuota(token) {
@@ -68,32 +89,43 @@ function normalize(data, login) {
   return { version: 1, account: login, observedAt: new Date().toISOString(), usedPercent: unlimited ? null : 100 - percent, unlimited, resetAt: reset, plan: typeof data.copilot_plan === 'string' ? data.copilot_plan : null };
 }
 async function refresh(forceInteractive = false) {
-  if (refreshing) return;
+  if (refreshing || !enabled || Date.now() < nextAllowed) return;
   const generation = epoch;
-  if (!enabled && !forceInteractive) return;
-  if (Date.now() < nextAllowed) return;
+  const writeReading = value => write(value, { generation, requiresMonitoring: true });
   refreshing = true;
   try {
+    if (!await canRefresh(generation)) return;
     const session = await vscode.authentication.getSession('github', scope, forceInteractive ? { createIfNone: true } : { silent: true });
-    if (!session) { await write({ version: 1, error: '請在 VS Code 執行「AI 額度：連接 VS Code 的 GitHub 帳號」。' }); return; }
+    if (!await canRefresh(generation)) return;
+    if (!session) { await writeReading({ version: 1, error: '請在 VS Code 執行「AI 額度：連接 VS Code 的 GitHub 帳號」。' }); return; }
     const data = await fetchQuota(session.accessToken);
+    if (!await canRefresh(generation)) return;
     const after = await vscode.authentication.getSession('github', scope, { silent: true });
     if (!enabled || epoch !== generation || !after || after.id !== session.id) return;
-    await write(normalize(data, session.account.label));
+    await writeReading(normalize(data, session.account.label));
   } catch (e) {
-    if (enabled && epoch === generation) await write({ version: 1, error: e instanceof Error && /^GitHub |^Copilot |^此帳號/.test(e.message) ? e.message : '無法取得 Copilot 額度，請檢查 GitHub 登入。' }).catch(() => {});
+    if (enabled && epoch === generation) await writeReading({ version: 1, error: e instanceof Error && /^GitHub |^Copilot |^此帳號/.test(e.message) ? e.message : '無法取得 Copilot 額度，請檢查 GitHub 登入。' }).catch(() => {});
   } finally { refreshing = false; }
 }
 async function activate(context) {
   enabled = context.globalState.get('connected', false);
   context.subscriptions.push(vscode.commands.registerCommand('aiUsageWidget.connectCopilot', async () => {
-    enabled = true; epoch++; await context.globalState.update('connected', true);
+    if (!await isMonitoringCopilot()) {
+      vscode.window.showInformationMessage('Copilot 監控已暫停，請先在 AI 額度的「監控來源」勾選 GitHub Copilot。');
+      return;
+    }
+    enabled = true;
+    const generation = ++epoch;
+    await context.globalState.update('connected', true);
+    if (!enabled || generation !== epoch) return;
     await refresh(true);
-    if (enabled) vscode.window.showInformationMessage('已嘗試連接 Copilot；請在 AI 額度視窗查看狀態。');
+    if (enabled && generation === epoch) vscode.window.showInformationMessage('已嘗試連接 Copilot；請在 AI 額度視窗查看狀態。');
   }));
   context.subscriptions.push(vscode.commands.registerCommand('aiUsageWidget.disconnectCopilot', async () => {
-    enabled = false; epoch++; await context.globalState.update('connected', false);
-    await write({ version: 1, error: '已中斷 Copilot 連接。' }).catch(() => {});
+    enabled = false;
+    const generation = ++epoch;
+    await context.globalState.update('connected', false);
+    await write({ version: 1, error: '已中斷 Copilot 連接。' }, { generation }).catch(() => {});
   }));
   context.subscriptions.push(vscode.commands.registerCommand('aiUsageWidget.refreshCopilot', () => refresh(false)));
   context.subscriptions.push(vscode.authentication.onDidChangeSessions(e => { if (e.provider.id === 'github' && enabled) { epoch++; write({ version: 1, error: 'GitHub 登入已變更，正在重新確認。' }).catch(() => {}); refresh(false); } }));

@@ -10,6 +10,8 @@ Windows 懸浮視窗，用來查看 Claude、Codex 和 GitHub Copilot 的剩餘�
 
 在系統匣右鍵可立即更新、複製 Claude 連線狀態、設定開機啟動或結束程式。請先結束舊版再執行新版。
 
+在系統匣右鍵開啟「監控來源」，可分別勾選 Claude、Codex 和 GitHub Copilot。預設全部開啟，也可全部關閉。變更會立即套用並在重啟後保留。若要讓取消勾選 GitHub Copilot 同時暫停向 GitHub 查詢，請將 VS Code 的 AI 額度 Copilot Bridge 更新至 0.1.1 或更新版本。重新勾選後會在下次排程或手動更新時恢復查詢，原有授權可繼續使用。
+
 ## 資料來源與限制
 
 - **Claude**：讀取目前 Windows 使用者的 Claude Desktop 本機資料，使用 Windows 保護的 OAuth 登入資料查詢用量，並核對帳號與組織；token 在記憶體使用，不寫入其他檔案或記錄。若即時查詢失敗，會使用本機用量紀錄，重置時間可能未知。方案標籤目前固定顯示 Team，並非自動偵測。
@@ -30,7 +32,7 @@ dotnet publish .\AiUsageWidget.csproj -c Release -r win-x64 --self-contained tru
 
 ```powershell
 dotnet run --project tests\Checks.csproj -c Release
-node --test vscode-copilot-bridge\tests\quota.test.js
+node --test vscode-copilot-bridge/tests/*.test.js
 ```
 
 本專案不設定或執行 GitHub Actions。

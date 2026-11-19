@@ -18,72 +18,176 @@ namespace AiUsageWidget;
 
 public partial class MainWindow : Window
 {
+    private static readonly (MonitorSource Source, string Name, string MenuLabel)[] Sources =
+    {
+        (MonitorSource.Claude, "Claude", "Claude"),
+        (MonitorSource.Codex, "Codex", "Codex"),
+        (MonitorSource.Copilot, "Copilot", "GitHub Copilot")
+    };
+    private static readonly string SettingsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AiUsageWidget");
+    private readonly string positionFile = Path.Combine(SettingsDirectory, "window.json");
+    private readonly string sourcesFile = Path.Combine(SettingsDirectory, "sources.json");
     private readonly Forms.NotifyIcon tray;
     private readonly System.Drawing.Icon trayIcon;
+    private readonly Forms.ToolStripMenuItem refreshMenuItem;
+    private readonly Forms.ToolStripMenuItem claudeDiagnosticMenuItem;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMinutes(1) };
-    private readonly DispatcherTimer displayTimer = new() { Interval = TimeSpan.FromMinutes(1) };
-    private readonly List<Usage> readings = new();
-    private bool exiting, refreshing, loaded;
-    private readonly string settingsFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AiUsageWidget", "window.json");
+    private readonly Dictionary<MonitorSource, Usage> readings = new();
+    private readonly Dictionary<MonitorSource, CancellationTokenSource> requests = new();
+    private SourceSettings sourceSettings;
+    private bool exiting, loaded;
     private record WindowPosition(double Left, double Top);
 
     public MainWindow()
     {
         InitializeComponent();
+        sourceSettings = SourceSettings.Load(sourcesFile);
         trayIcon = CreateTrayIcon();
         tray = new Forms.NotifyIcon { Icon = trayIcon, Text = "AI 額度", Visible = true };
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("顯示／隱藏", null, (_, _) => ToggleWindow());
-        menu.Items.Add("立即更新", null, async (_, _) => await Refresh());
-        menu.Items.Add("複製 Claude 連線狀態", null, (_, _) =>
+        refreshMenuItem = new Forms.ToolStripMenuItem("立即更新", null, async (_, _) => await Refresh());
+        menu.Items.Add(refreshMenuItem);
+        var sourceMenu = new Forms.ToolStripMenuItem("監控來源");
+        foreach (var (source, _, label) in Sources)
+        {
+            var item = new Forms.ToolStripMenuItem(label) { Checked = sourceSettings.IsEnabled(source) };
+            item.Click += async (_, _) => await ToggleSource(source, item);
+            sourceMenu.DropDownItems.Add(item);
+        }
+        menu.Items.Add(sourceMenu);
+        claudeDiagnosticMenuItem = new Forms.ToolStripMenuItem("複製 Claude 連線狀態", null, (_, _) =>
         {
             try { Clipboard.SetText(ClaudeLive.DiagnosticStatus()); }
             catch (System.Runtime.InteropServices.ExternalException) { }
         });
+        menu.Items.Add(claudeDiagnosticMenuItem);
         var start = new Forms.ToolStripMenuItem("開機啟動") { Checked = IsAutoStartEnabled(), CheckOnClick = false };
         start.Click += (_, _) => { SetAutoStart(!IsAutoStartEnabled()); start.Checked = IsAutoStartEnabled(); };
         menu.Items.Add(start);
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("結束", null, (_, _) => { exiting = true; SavePosition(); tray.Visible = false; tray.Dispose(); trayIcon.Dispose(); System.Windows.Application.Current.Shutdown(); });
+        menu.Items.Add("結束", null, (_, _) => Exit());
         tray.ContextMenuStrip = menu;
         tray.MouseClick += (_, e) => { if (e.Button == Forms.MouseButtons.Left) ToggleWindow(); };
         timer.Tick += async (_, _) => await Refresh();
-        displayTimer.Tick += (_, _) => { if (readings.Count >= 3) readings[2] = UsageSources.Copilot(); Render(); };
-        readings.Add(new("Claude", null, Array.Empty<Limit>(), null, "等待查詢…"));
-        readings.Add(new("Codex", null, Array.Empty<Limit>(), null, "等待查詢…"));
-        readings.Add(UsageSources.Copilot());
+        UpdateSourceControls();
         Render();
     }
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        RestorePosition(); loaded = true;
-        timer.Start(); displayTimer.Start();
+        if (loaded) return;
+        RestorePosition();
+        loaded = true;
+        UpdateSourceControls();
         await Refresh();
     }
-    private async Task Refresh()
+
+    private async Task ToggleSource(MonitorSource source, Forms.ToolStripMenuItem item)
     {
-        if (refreshing) return;
-        refreshing = true; RefreshButton.IsEnabled = false;
-        try
+        var enabled = !sourceSettings.IsEnabled(source);
+        var updated = sourceSettings.WithEnabled(source, enabled);
+        if (!updated.TrySave(sourcesFile))
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var claudeTask = ClaudeLive.Fetch(timeout.Token);
-            var codexTask = UsageSources.Codex(timeout.Token);
-            var liveClaude = await claudeTask;
-            var claude = liveClaude ?? await Task.Run(() => UsageSources.Claude());
-            if (liveClaude is null) claude = claude with { Note = $"{ClaudeLive.LastFailure}\n{claude.Note}" };
-            var codex = await codexTask;
-            readings.Clear(); readings.Add(claude); readings.Add(codex); readings.Add(UsageSources.Copilot());
-            Render();
+            tray.ShowBalloonTip(4000, "無法儲存監控來源", "請確認設定資料夾可以寫入。", Forms.ToolTipIcon.Warning);
+            return;
         }
-        finally { refreshing = false; RefreshButton.IsEnabled = true; }
+
+        sourceSettings = updated;
+        item.Checked = enabled;
+        if (!enabled)
+        {
+            readings.Remove(source);
+            if (requests.TryGetValue(source, out var request)) request.Cancel();
+        }
+        UpdateSourceControls();
+        Render();
+        if (enabled) await RefreshSource(source);
     }
+
+    private void UpdateSourceControls()
+    {
+        RefreshButton.IsEnabled = refreshMenuItem.Enabled = sourceSettings.AnyEnabled;
+        claudeDiagnosticMenuItem.Enabled = sourceSettings.Claude;
+        timer.IsEnabled = loaded && sourceSettings.AnyEnabled;
+    }
+
+    private Task Refresh()
+    {
+        if (exiting || !sourceSettings.AnyEnabled) return Task.CompletedTask;
+        Render();
+        return Task.WhenAll(Sources.Select(source => RefreshSource(source.Source)));
+    }
+
+    private async Task RefreshSource(MonitorSource source)
+    {
+        if (requests.ContainsKey(source)) return;
+
+        // If a source is re-enabled during cancellation, restart after the old request settles.
+        while (!exiting && sourceSettings.IsEnabled(source))
+        {
+            using var request = new CancellationTokenSource();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(request.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            requests.Add(source, request);
+            try
+            {
+                var usage = source switch
+                {
+                    MonitorSource.Claude => await Task.Run(() => RefreshClaude(timeout.Token, request.Token), request.Token),
+                    MonitorSource.Codex => await Task.Run(() => UsageSources.Codex(timeout.Token), request.Token),
+                    MonitorSource.Copilot => UsageSources.Copilot(),
+                    _ => throw new ArgumentOutOfRangeException(nameof(source))
+                };
+                if (!request.IsCancellationRequested)
+                {
+                    readings[source] = usage;
+                    Render();
+                    return;
+                }
+            }
+            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+            finally { requests.Remove(source); }
+        }
+    }
+
+    private static async Task<Usage> RefreshClaude(CancellationToken timeout, CancellationToken request)
+    {
+        var live = await ClaudeLive.Fetch(timeout);
+        request.ThrowIfCancellationRequested();
+        if (live is not null) return live;
+        var local = UsageSources.Claude();
+        return local with { Note = $"{ClaudeLive.LastFailure}\n{local.Note}" };
+    }
+
+    private void Exit()
+    {
+        exiting = true;
+        timer.Stop();
+        foreach (var request in requests.Values.ToArray()) request.Cancel();
+        SavePosition();
+        tray.Visible = false;
+        tray.Dispose();
+        trayIcon.Dispose();
+        System.Windows.Application.Current.Shutdown();
+    }
+
     private void Render()
     {
         Cards.Children.Clear();
-        foreach (var usage in readings) Cards.Children.Add(Card(usage));
+        if (!sourceSettings.AnyEnabled)
+        {
+            Cards.Children.Add(new TextBlock { Text = "尚未選擇監控來源", Margin = new Thickness(4, 0, 4, 6), Foreground = Brush("#9AA3AD") });
+            return;
+        }
+        foreach (var (source, name, _) in Sources)
+        {
+            if (!sourceSettings.IsEnabled(source)) continue;
+            var hasReading = readings.TryGetValue(source, out var usage);
+            Cards.Children.Add(Card(usage ?? new Usage(name, null, Array.Empty<Limit>(), null, null), waiting: !hasReading));
+        }
     }
-    private Border Card(Usage u)
+    private Border Card(Usage u, bool waiting)
     {
         var card = new Border { Background = Brush("#181B21"), BorderBrush = Brush("#262A33"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(10,8,10,6), Margin = new Thickness(0,0,0,6) };
         var content = new StackPanel(); card.Child = content;
@@ -112,7 +216,7 @@ public partial class MainWindow : Window
             row.Children.Add(new TextBlock { Text = ResetText(limit.Reset), FontSize = 12, Foreground = Brush("#9AA3AD"), Margin = new Thickness(0,4,0,0) });
             content.Children.Add(row);
         }
-        if (u.Limits.Count == 0) content.Children.Add(new TextBlock { Text = u.Observed is not null ? "沒有額度上限或資料" : "尚未連接", FontSize = 12, Foreground = Brush("#9AA3AD") });
+        if (u.Limits.Count == 0) content.Children.Add(new TextBlock { Text = waiting ? "等待查詢…" : u.Observed is not null ? "沒有額度上限或資料" : "尚未連接", FontSize = 12, Foreground = Brush("#9AA3AD") });
         else if (u.Stale) content.Children.Add(new TextBlock { Text = "資料可能已過期", FontSize = 12, Foreground = Brush("#E3A008") });
         return card;
     }
@@ -179,7 +283,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            WindowPosition? position = File.Exists(settingsFile) ? JsonSerializer.Deserialize<WindowPosition>(File.ReadAllText(settingsFile)) : null;
+            WindowPosition? position = File.Exists(positionFile) ? JsonSerializer.Deserialize<WindowPosition>(File.ReadAllText(positionFile)) : null;
             // WPF positions are device-independent; use the primary working area for the default and fallback.
             var area = SystemParameters.WorkArea;
             if (position is not null && double.IsFinite(position.Left) && double.IsFinite(position.Top) && Forms.Screen.AllScreens.Any(s => { var scale = VisualTreeHelper.GetDpi(this); var x = position.Left * scale.DpiScaleX; var y = position.Top * scale.DpiScaleY; return x >= s.WorkingArea.Left - 100 && x < s.WorkingArea.Right - 30 && y >= s.WorkingArea.Top && y < s.WorkingArea.Bottom - 30; })) { Left = position.Left; Top = position.Top; }
@@ -189,7 +293,7 @@ public partial class MainWindow : Window
     }
     private void SavePosition()
     {
-        try { Directory.CreateDirectory(Path.GetDirectoryName(settingsFile)!); File.WriteAllText(settingsFile, JsonSerializer.Serialize(new WindowPosition(Left, Top))); }
+        try { Directory.CreateDirectory(SettingsDirectory); File.WriteAllText(positionFile, JsonSerializer.Serialize(new WindowPosition(Left, Top))); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
     private static bool IsAutoStartEnabled()

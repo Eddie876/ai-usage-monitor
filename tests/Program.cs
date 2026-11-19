@@ -4,6 +4,26 @@ var config = Path.Combine(tmp, "config");
 var local = Path.Combine(tmp, "local");
 try
 {
+    var settingsFile = Path.Combine(tmp, "settings", "sources.json");
+    if (SourceSettings.Load(settingsFile) != new SourceSettings())
+        throw new Exception("All sources must be enabled by default.");
+    var settings = new SourceSettings().WithEnabled(MonitorSource.Claude, false).WithEnabled(MonitorSource.Copilot, false);
+    if (!settings.TrySave(settingsFile) || SourceSettings.Load(settingsFile) != settings)
+        throw new Exception("A subset of enabled sources must persist.");
+    var paused = settings.WithEnabled(MonitorSource.Codex, false);
+    if (paused.AnyEnabled || !paused.TrySave(settingsFile) || SourceSettings.Load(settingsFile) != paused)
+        throw new Exception("Disabling all sources must persist when replacing settings.");
+    File.WriteAllText(settingsFile, "{\"claude\":false,\"copilot\":\"false\",\"other\":false}");
+    if (SourceSettings.Load(settingsFile) != new SourceSettings(Claude: false))
+        throw new Exception("Missing and invalid fields must default to enabled independently.");
+    File.WriteAllText(settingsFile, "{");
+    if (SourceSettings.Load(settingsFile) != new SourceSettings())
+        throw new Exception("Invalid JSON must fall back to defaults.");
+    var blockedPath = Path.Combine(tmp, "blocked-settings", "sources.json");
+    Directory.CreateDirectory(blockedPath);
+    if (paused.TrySave(blockedPath) || Directory.EnumerateFiles(Path.GetDirectoryName(blockedPath)!).Any())
+        throw new Exception("A failed settings replacement must be reported and clean up the temporary file.");
+
     var dir = Path.Combine(config, "Claude");
     Directory.CreateDirectory(dir);
     var file = Path.Combine(dir, "plan-usage-history.json");
@@ -89,6 +109,6 @@ try
         """);
     if (!ClaudeLive.ParseWindows(unusedFable.RootElement).SequenceEqual(new Limit[] { new("Fable 本週", 0, null) }))
         throw new Exception("A valid zero-usage Fable window should still appear when there is no session limit.");
-    Console.WriteLine("Claude and Copilot source checks passed.");
+    Console.WriteLine("Source settings, Claude, and Copilot checks passed.");
 }
 finally { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); }
